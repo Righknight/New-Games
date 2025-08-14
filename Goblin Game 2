@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>Goblin King’s Tower</title>
+<style>
+  html,body { margin:0; height:100%; background:#090d14; color:#dfe9ff; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+  canvas { display:block; width:100vw; height:100vh; image-rendering: pixelated; touch-action:none; }
+  #hud { position:fixed; left:10px; top:10px; z-index:3; font-weight:700; pointer-events:none; text-shadow:0 2px 0 #0008; }
+  #hud .chip { display:inline-block; background:#0b1322cc; padding:6px 10px; margin:0 6px 6px 0; border:1px solid #31405f; border-radius:8px }
+  #msg { position:fixed; left:50%; transform:translateX(-50%); bottom:12px; z-index:3; background:#0b1322cc; padding:6px 10px; border:1px solid #31405f; border-radius:8px; pointer-events:none; font-size:12px; opacity:.9 }
+  #ui { position:fixed; inset:0; z-index:5; pointer-events:none; }
+  .panel {
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    pointer-events:auto; background:#0c1322f2; border:2px solid #355289; border-radius:12px; padding:18px;
+    width:min(92vw,760px); box-shadow:0 24px 60px rgba(0,0,0,.55);
+  }
+  .panel h1 { margin:0 0 8px; font-size:28px; letter-spacing:.4px; }
+  .panel h2 { margin:14px 0 8px; font-size:18px; opacity:.95 }
+  .panel p { margin:6px 0; line-height:1.4; opacity:.9 }
+  .row { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }
+  button {
+    appearance:none; border:0; border-radius:10px; padding:10px 14px; font-weight:700; cursor:pointer;
+    background:#6a8dff; color:#fff; box-shadow:0 10px 20px rgba(106,141,255,.35);
+  }
+  button.secondary { background:#1b2740; color:#cfe0ff; box-shadow:none; border:1px solid #324a7a }
+  button:active { transform:translateY(1px); }
+  .kbd { display:inline-block; padding:0 6px; border:1px solid #3b548a; border-radius:6px; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:12px; background:#0c1220; }
+  .small { font-size:12px; opacity:.8 }
+  .right { float:right; opacity:.8; font-size:12px; }
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Goblin King’s Tower game canvas"></canvas>
+
+<div id="hud" role="status" aria-live="polite"></div>
+<div id="msg">Move with mouse/finger. Click/Tap to jump (double-jump). Your blue shots bounce. Reach the crown!</div>
+
+<div id="ui">
+  <div id="menu" class="panel" hidden>
+    <h1>👑 Goblin King’s Tower</h1>
+    <p>Climb a procedurally generated spire of steel and stone. Goblins swarm. A crowned King rules the top. Your bouncy blue shots ricochet around the arena. Collect armor and weapon upgrades, double-jump your way up, defeat the King, claim the crown, and climb again.</p>
+    <div class="row">
+      <button id="btnStart">New Run</button>
+      <button id="btnContinue" class="secondary">Continue</button>
+      <button id="btnWipe" class="secondary">Reset Save</button>
+    </div>
+    <h2>How to Play</h2>
+    <p>• Move: move your mouse or drag a finger — your hero runs toward it. <span class="right small">Keyboard fallback: <span class="kbd">A</span>/<span class="kbd">D</span> or ⬅️/➡️</span></p>
+    <p>• Jump: click / tap (double-jump). <span class="right small">Keyboard: <span class="kbd">Space</span> / <span class="kbd">W</span> / ⬆️</span></p>
+    <p>• Aim: your shots auto-aim at the pointer.</p>
+    <h2>Local Leaderboard</h2>
+    <div id="board"></div>
+  </div>
+
+  <div id="levelOver" class="panel" hidden>
+    <h1 id="levelTitle">Level Complete</h1>
+    <p id="levelStats"></p>
+    <div class="row">
+      <button id="btnNext">Continue</button>
+      <button id="btnQuit" class="secondary">Quit to Menu</button>
+    </div>
+  </div>
+
+  <div id="gameOver" class="panel" hidden>
+    <h1>💀 Game Over</h1>
+    <p id="finalStats"></p>
+    <div class="row">
+      <button id="btnRestart">New Run</button>
+      <button id="btnBack" class="secondary">Menu</button>
+    </div>
+    <h2>Local Leaderboard</h2>
+    <div id="board2"></div>
+  </div>
+</div>
+
+<script>
+(()=>{"use strict";
+
+/* =========================
+   Canvas, DPI, Sizing
+========================= */
+const DPR = Math.max(1, Math.min(2, devicePixelRatio||1));
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W=0, H=0;
+function resize(){ W=(innerWidth*DPR)|0; H=(innerHeight*DPR)|0; canvas.width=W; canvas.height=H; }
+addEventListener("resize", resize, {passive:true}); resize();
+
+/* =========================
+   UI helpers
+========================= */
+const hud = document.getElementById("hud");
+const menu = document.getElementById("menu");
+const levelOver = document.getElementById("levelOver");
+const gameOver = document.getElementById("gameOver");
+const msg = document.getElementById("msg");
+const $id = id => document.getElementById(id);
+const board = $id("board"), board2 = $id("board2");
+
+/* =========================
+   RNG (deterministic per level)
+========================= */
+let seed = (Math.random()*1e9)|0;
+function rand(){ seed = (seed*1664525 + 1013904223) >>> 0; return seed/0x100000000; }
+const rrange = (a,b)=> a + rand()*(b-a);
+const rpick = arr => arr[(rand()*arr.length)|0];
+
+/* =========================
+   Local Save + Scores
+========================= */
+const SAVE_KEY="gkt_save_v1";
+const SCORE_KEY="gkt_scores_v1";
+function saveState(){
+  const data = {
+    level, crowns, score, startedAt, rngSeed:seed,
+    player:{hp:player.hp, maxHp:player.maxHp, armor:player.armor, weaponIndex},
+    unlocks:[...unlocks],
+  };
+  localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+}
+function loadState(){
+  try{ const raw = localStorage.getItem(SAVE_KEY); return raw? JSON.parse(raw): null; }catch(_){return null;}
+}
+function wipeState(){ localStorage.removeItem(SAVE_KEY); updateMenu(); }
+function submitScore(name, score, crowns, level, timeSec){
+  const entry = {name, score, crowns, level, timeSec, when: Date.now()};
+  const list = JSON.parse(localStorage.getItem(SCORE_KEY)||"[]");
+  list.push(entry); list.sort((a,b)=> b.score-a.score);
+  localStorage.setItem(SCORE_KEY, JSON.stringify(list.slice(0,10)));
+}
+function renderBoard(el){
+  const list = JSON.parse(localStorage.getItem(SCORE_KEY)||"[]");
+  if(!list.length){ el.innerHTML="<p class='small'>No scores yet. Good luck!</p>"; return; }
+  el.innerHTML = "<ol style='margin:6px 0 0 18px; padding:0'>" + list.map(e=>{
+    const d=new Date(e.when); const mm=String(d.getMonth()+1).padStart(2,"0"); const dd=String(d.getDate()).padStart(2,"0");
+    return `<li><strong>${e.name||"You"}</strong> — <em>${e.score}</em> pts · 👑 ${e.crowns} · L${e.level} · ${Math.round(e.timeSec)}s <span class="small" style="opacity:.6">(${d.getFullYear()}-${mm}-${dd})</span></li>`;
+  }).join("") + "</ol>";
+}
+
+/* =========================
+   Input (pointer-first, keyboard fallback)
+========================= */
+const input = { pointerX: W/2, pointerY: H/2, wantJump:false, left:false, right:false, touchId:null };
+addEventListener("mousemove", e=>{
+  const r=canvas.getBoundingClientRect(); input.pointerX=(e.clientX-r.left)*DPR; input.pointerY=(e.clientY-r.top)*DPR;
+},{passive:true});
+addEventListener("mousedown", e=>{ if(e.button===0) input.wantJump=true; });
+addEventListener("mouseup", e=>{ if(e.button===0) input.wantJump=false; });
+canvas.addEventListener("touchstart", e=>{
+  const t=e.changedTouches[0]; input.touchId=t.identifier;
+  const r=canvas.getBoundingClientRect(); input.pointerX=(t.clientX-r.left)*DPR; input.pointerY=(t.clientY-r.top)*DPR;
+  input.wantJump=true; e.preventDefault();
+},{passive:false});
+canvas.addEventListener("touchmove", e=>{
+  for(const t of e.changedTouches){ if(t.identifier===input.touchId){
+    const r=canvas.getBoundingClientRect(); input.pointerX=(t.clientX-r.left)*DPR; input.pointerY=(t.clientY-r.top)*DPR; break;
+  }}
+  e.preventDefault();
+},{passive:false});
+canvas.addEventListener("touchend", e=>{
+  for(const t of e.changedTouches){ if(t.identifier===input.touchId){ input.touchId=null; input.wantJump=false; break; }}
+  e.preventDefault();
+},{passive:false});
+// Keyboard fallback
+addEventListener("keydown", e=>{
+  if(["ArrowLeft","a","A"].includes(e.key)) input.left=true;
+  if(["ArrowRight","d","D"].includes(e.key)) input.right=true;
+  if(["ArrowUp","w","W"," "].includes(e.key)) input.wantJump=true;
+});
+addEventListener("keyup", e=>{
+  if(["ArrowLeft","a","A"].includes(e.key)) input.left=false;
+  if(["ArrowRight","d","D"].includes(e.key)) input.right=false;
+  if(["ArrowUp","w","W"," "].includes(e.key)) input.wantJump=false;
+});
+
+/* =========================
+   Embedded Pixel Sprites (generated to Base64 on load)
+   We programmatically paint tiny pixel-art sprites to offscreen canvases,
+   convert them to data URLs, and use them as Image() textures.
+========================= */
+const SPR = {};
+function makeSprite(w,h, painter){
+  const c=document.createElement("canvas"); c.width=w; c.height=h;
+  const x=c.getContext("2d"); x.imageSmoothingEnabled=false;
+  painter(x,w,h);
+  const img=new Image(); img.src=c.toDataURL("image/png"); return img;
+}
+// Simple helpers
+function px(x,y,w=1,h=1,color="#fff", g){ g.fillStyle=color; g.fillRect(x|0,y|0,w|0,h|0); }
+function outline(g,w,h,color="#000"){ g.strokeStyle=color; g.lineWidth=1; g.strokeRect(.5,.5,w-1,h-1); }
+
+// Player 24x28
+SPR.player = makeSprite(24,28,(g,w,h)=>{
+  // body
+  px(2,2,20,24,"#2f7bd6",g);
+  // visor
+  px(6,6,12,8,"#cfe7ff",g); px(7,7,10,6,"#e7f3ff",g);
+  // arm cannon
+  px(18,14,6,6,"#4aa3ff",g);
+  // trim + outline
+  px(0,0,w,2,"#5e92e0",g); px(0,h-2,w,2,"#1a3352",g); px(0,0,2,h,"#1a3352",g); px(w-2,0,2,h,"#5e92e0",g);
+  outline(g,w,h,"#0b1220");
+});
+// Goblin 22x24
+SPR.goblin = makeSprite(22,24,(g,w,h)=>{
+  px(0,0,w,h,"#2c8c3a",g);
+  // darker belly
+  px(3,12,16,9,"#20742d",g);
+  // eyes
+  px(6,6,4,3,"#ffe1e1",g); px(12,6,4,3,"#ffe1e1",g);
+  px(7,7,2,2,"#701010",g); px(13,7,2,2,"#701010",g);
+  // horns-ish
+  px(2,2,3,2,"#539b54",g); px(w-5,2,3,2,"#539b54",g);
+  outline(g,w,h,"#142616");
+});
+// Flyer wings (added when drawing)
+SPR.flyWing = makeSprite(10,4,(g,w,h)=>{ px(0,0,w,h,"#47b56e",g); outline(g,w,h,"#0a1f13"); });
+// Boss 40x34 + crown
+SPR.boss = makeSprite(40,34,(g,w,h)=>{
+  px(0,0,w,h,"#7a2e2e",g); px(4,4,w-8,h-8,"#8d3939",g);
+  px(10,10,6,5,"#ffd0d0",g); px(24,10,6,5,"#ffd0d0",g);
+  px(11,11,2,3,"#500",g); px(25,11,2,3,"#500",g);
+  outline(g,w,h,"#2a1111");
+});
+SPR.crown = makeSprite(28,12,(g,w,h)=>{
+  px(0,6,w,6,"#ffd65a",g);
+  px(2,2,4,4,"#ffd65a",g); px(12,0,4,6,"#ffd65a",g); px(22,2,4,4,"#ffd65a",g);
+  outline(g,w,h,"#4b3a10");
+});
+// Heart, Shield, Weapon Gems, Bullet
+SPR.heart = makeSprite(16,14,(g,w,h)=>{ px(5,0,6,4,"#ff6b6b",g); px(1,3,14,6,"#ff4b4b",g); px(3,7,10,7,"#e33a3a",g); outline(g,w,h,"#3a0a0a"); });
+SPR.shield = makeSprite(12,14,(g,w,h)=>{ px(0,0,w,h,"#9ccaff",g); px(2,2,w-4,h-4,"#2a4f7e",g); outline(g,w,h,"#102742"); });
+SPR.gem = ["#55b7ff","#7fe07f","#e0a87f","#d77fff","#ffef7f","#b7a7ff"].map(col =>
+  makeSprite(12,12,(g,w,h)=>{ px(0,0,w,h,col,g); px(4,4,4,4,"#fff",g); outline(g,w,h,"#1a1a1a"); })
+);
+SPR.bullet = makeSprite(6,6,(g,w,h)=>{ px(0,0,w,h,"#55b7ff",g); outline(g,w,h,"#14324e"); });
+
+// Platform tiles (9-slice)
+SPR.tile = makeSprite(32,16,(g,w,h)=>{
+  px(0,0,w,h,"#2b3d63",g);
+  // rivets + bevel
+  px(0,0,w,2,"#3e5a8f",g); px(0,h-2,w,2,"#1b2744",g); px(0,0,2,h,"#1b2744",g); px(w-2,0,2,h,"#3e5a8f",g);
+  px(4,4,2,2,"#6a86c9",g); px(w-6,4,2,2,"#6a86c9",g); px(4,h-6,2,2,"#6a86c9",g); px(w-6,h-6,2,2,"#6a86c9",g);
+});
+SPR.tileBoss = makeSprite(32,16,(g,w,h)=>{
+  px(0,0,w,h,"#364a7a",g);
+  px(0,0,w,2,"#4d67a7",g); px(0,h-2,w,2,"#213458",g); px(0,0,2,h,"#213458",g); px(w-2,0,2,h,"#4d67a7",g);
+  px(4,4,2,2,"#86a2ea",g); px(w-6,4,2,2,"#86a2ea",g); px(4,h-6,2,2,"#86a2ea",g); px(w-6,h-6,2,2,"#86a2ea",g);
+});
+
+/* =========================
+   Game State
+========================= */
+let level=1, crowns=0, score=0, startedAt=performance.now(), clearsThisRun=0;
+let cameraY=0, worldH=4000;
+let platforms=[], pickups=[], enemies=[], bullets=[], particles=[];
+let boss=null, gamePaused=true;
+let unlocks=new Set(["Gun"]); let weaponIndex=0;
+const WEAPONS = [
+  {name:"Gun",          rate:7,  bulletSpeed:9,  damage:1, spread:0.02, multishot:1, bounce:2},
+  {name:"Cannon",       rate:4,  bulletSpeed:7,  damage:2, spread:0.02, multishot:1, bounce:3},
+  {name:"Machine Gun",  rate:12, bulletSpeed:10, damage:1, spread:0.05, multishot:1, bounce:2},
+  {name:"Tri-Shot",     rate:8,  bulletSpeed:9,  damage:1, spread:0.15, multishot:3, bounce:2},
+  {name:"Power Blaster",rate:5,  bulletSpeed:12, damage:3, spread:0.03, multishot:1, bounce:4},
+  {name:"Orb Storm",    rate:16, bulletSpeed:8,  damage:1, spread:0.6,  multishot:6, bounce:3},
+];
+// Player
+const player = { x:120,y:0,w:24,h:28,vx:0,vy:0,onGround:false,jumps:2,maxJumps:2,hp:3,maxHp:3,armor:0,fireCooldown:0, kills:0, shotsFired:0, shotsHit:0 };
+
+/* =========================
+   Level Generation (reachable)
+========================= */
+function generateLevel(n){
+  platforms=[]; pickups=[]; enemies=[]; bullets=[]; particles=[]; boss=null;
+
+  const heightPerLevel = 2600 + (n-1)*320; worldH = Math.min(9000, heightPerLevel);
+  const platCount = Math.min(110, 38 + (n-1)*6);
+  const laneW = Math.max(160, 320 - n*6);
+  const minGapY=110, maxGapY=160 + Math.max(0, 40 - n*2);
+  const maxHoriz=260, baseY=200;
+
+  platforms.push({x:0,y:worldH-20,w:2200,h:20,kind:"ground"});
+  let lastX=120, lastY=worldH-120;
+
+  for(let i=0;i<platCount;i++){
+    const gapY = rrange(minGapY,maxGapY);
+    const y = Math.max(baseY, lastY - gapY);
+    const x = Math.max(40, Math.min(W+600, lastX + rrange(-maxHoriz,maxHoriz)));
+    const w = rrange(90,170);
+    platforms.push({x,y,w,h:16,kind:"platform"});
+    if(rand()<0.28){ // helper mid step
+      const midY=(y+lastY)/2, midX=(x+lastX)/2 + rrange(-40,40);
+      platforms.push({x:midX,y:midY,w:rrange(60,110),h:14,kind:"step"});
+    }
+    lastX=x; lastY=y;
+    if(rand()<0.26) pickups.push(spawnPickup(x + w*rrange(.15,.85), y-20));
+    if(rand()<(0.35 + n*0.02)) enemies.push(spawnGoblin(x+w*0.5, y-16, n));
+    if(rand()<(0.18 + n*0.02)) enemies.push(spawnFlyer(x+w*0.5 + rrange(-120,120), y - rrange(80,140), n));
+  }
+
+  const bossPlat = {x:lastX-40, y:Math.max(120, lastY-140), w: 340, h: 18, kind:"boss"};
+  platforms.push(bossPlat);
+  for(let i=1;i<Math.min(WEAPONS.length, 2 + Math.floor(n/2)); i++){
+    const p=platforms[(platCount*(i/(Math.min(WEAPONS.length-1,5)+1)))|0];
+    pickups.push({x:p.x + p.w*0.5, y:p.y-22, type:"weapon", weapon:i});
+  }
+  const mid=platforms[(platCount/2)|0];
+  pickups.push({x:mid.x + mid.w*0.5, y:mid.y-20, type:"armor"});
+  pickups.push({x:bossPlat.x + bossPlat.w-40, y:bossPlat.y-20, type:"armor"});
+
+  boss=spawnBoss(bossPlat.x + bossPlat.w/2, bossPlat.y - 28, n);
+
+  player.x=120; player.y=worldH-100; player.vx=player.vy=0; player.onGround=false; player.jumps=player.maxJumps;
+
+  cameraY = Math.max(0, worldH - H);
+  flashMsg("Level " + n + " — reach the crown!");
+}
+
+/* =========================
+   Entities
+========================= */
+function spawnPickup(x,y){
+  const t=rand(); if(t<0.5) return {x,y,type:"heal"}; if(t<0.8) return {x,y,type:"armor"};
+  return {x,y,type:"weapon",weapon:Math.min(WEAPONS.length-1,(rand()*WEAPONS.length)|0)};
+}
+function spawnGoblin(x,y,n){
+  const speed = 0.7 + Math.min(1.8, n*0.05);
+  const hp = 2 + (n*0.25|0);
+  return {type:"goblin",x,y,vx:(rand()<.5?speed:-speed),vy:0,w:22,h:24,hp,maxHp:hp,onGround:false,timer:0,value:20+n*2};
+}
+function spawnFlyer(x,y,n){
+  const speed = 1.0 + Math.min(2.2, n*0.06);
+  const hp = 2 + (n*0.2|0);
+  return {type:"flyer",x,y,vx:speed,vy:0,w:22,h:20,hp,maxHp:hp,timer:0,value:25+n*3,swoopCooldown:180};
+}
+function spawnBoss(x,y,n){
+  const hp = 30 + n*18;
+  return {type:"boss",x,y,w:40,h:34,hp,maxHp:hp,vx:0.8+n*0.05,vy:0,onGround:false,timer:0,crown:true,spawnCd:240,jumpCd:140};
+}
+function addParticles(x,y,n,col){
+  for(let i=0;i<n;i++) particles.push({x,y,vx:rrange(-2,2),vy:rrange(-2,1),life:40+(rand()*20|0),col});
+}
+
+/* =========================
+   Physics / Collision
+========================= */
+function rectsOverlap(a,b){ return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y; }
+function collideWithPlatforms(body){
+  body.onGround=false;
+  body.y += body.vy;
+  for(const p of platforms){
+    if(!rectsOverlap(body,p)) continue;
+    if(body.vy>0 && body.y + body.h > p.y && body.y + body.h - body.vy <= p.y){ // land
+      body.y = p.y - body.h; body.vy=0; body.onGround=true;
+    } else if(body.vy<0 && body.y < p.y+p.h && body.y - body.vy >= p.y+p.h){
+      body.y = p.y + p.h; body.vy=0;
+    }
+  }
+  body.x += body.vx;
+  for(const p of platforms){
+    if(!rectsOverlap(body,p)) continue;
+    if(body.vx>0) body.x=p.x - body.w; else if(body.vx<0) body.x=p.x + p.w;
+    body.vx=0;
+  }
+}
+
+/* =========================
+   Update Loop
+========================= */
+let tick=0;
+function update(){
+  tick++;
+  // Movement toward pointer or keys
+  const targetX=input.pointerX; const runSpeed=2.1, accel=0.4;
+  let desired=0;
+  if(Math.abs(targetX - player.x) > 6) desired = Math.sign(targetX - player.x) * runSpeed;
+  if(input.left) desired=-runSpeed; if(input.right) desired=runSpeed;
+  player.vx += Math.max(-accel, Math.min(accel, desired - player.vx));
+
+  // Gravity + Jump
+  const g=0.45; player.vy += g;
+  if(input.wantJump && (player.onGround || player.jumps>0)){
+    player.vy = -7.9; if(!player.onGround) player.jumps--; input.wantJump=false;
+    addParticles(player.x+player.w/2, player.y+player.h, 10, "#6cf");
+  }
+  if(player.onGround) player.jumps = player.maxJumps;
+
+  collideWithPlatforms(player);
+
+  // Auto-fire toward pointer
+  const weapon=WEAPONS[weaponIndex]; if(player.fireCooldown>0) player.fireCooldown--;
+  const aimAng=Math.atan2((input.pointerY-(player.y+player.h/2)),(input.pointerX-(player.x+player.w/2)));
+  if(player.fireCooldown<=0){
+    for(let i=0;i<weapon.multishot;i++){
+      const a = aimAng + rrange(-weapon.spread, weapon.spread);
+      bullets.push({x:player.x+player.w/2+Math.cos(a)*12,y:player.y+player.h/2+Math.sin(a)*8,
+        vx:Math.cos(a)*weapon.bulletSpeed, vy:Math.sin(a)*weapon.bulletSpeed, r:3, dmg:weapon.damage, bounces:weapon.bounce, from:"player"});
+      player.shotsFired++;
+    }
+    player.fireCooldown = Math.max(2, (60/weapon.rate)|0);
+  }
+
+  // Bullets
+  for(const b of bullets){
+    b.x+=b.vx; b.y+=b.vy;
+    // bounds
+    if(b.x<0&&b.vx<0){ b.x=0; b.vx*=-1; b.bounces--; }
+    if(b.x>W&&b.vx>0){ b.x=W; b.vx*=-1; b.bounces--; }
+    if(b.y<0&&b.vy<0){ b.y=0; b.vy*=-1; b.bounces--; }
+    if(b.y>worldH&&b.vy>0){ b.y=worldH; b.vy*=-1; b.bounces--; }
+    for(const p of platforms){
+      if(b.x>p.x-2 && b.x<p.x+p.w+2 && b.y>p.y-2 && b.y<p.y+p.h+2){
+        const insideX = Math.min(b.x-p.x, (p.x+p.w)-b.x);
+        const insideY = Math.min(b.y-p.y, (p.y+p.h)-b.y);
+        if(insideX<insideY) b.vx*=-1; else b.vy*=-1;
+        b.bounces--; break;
+      }
+    }
+    b.dead = b.bounces<0;
+  }
+
+  // Enemies
+  for(const e of enemies){
+    e.timer++;
+    if(e.type==="goblin"){
+      e.vy += g*0.9;
+      if(e.onGround && rand()<0.01) e.vx*=-1;
+      if(e.onGround){
+        const ahead={x:e.x+Math.sign(e.vx)*12, y:e.y+e.h+2, w:2, h:2};
+        let support=false; for(const p of platforms){ if(rectsOverlap(ahead,p)){ support=true; break; } }
+        if(!support) e.vx*=-1;
+      }
+      collideWithPlatforms(e);
+    } else { // flyer
+      const dx=(player.x-e.x), dy=(player.y-e.y), dist=Math.hypot(dx,dy);
+      if(e.swoopCooldown>0) e.swoopCooldown--;
+      if(e.swoopCooldown<=0 && dist<280 && rand()<0.03){
+        const a=Math.atan2(dy,dx); const s=1.8 + Math.min(2.2, level*0.1);
+        e.vx=Math.cos(a)*s; e.vy=Math.sin(a)*s; e.swoopCooldown = 120 + (rand()*90|0);
+      } else {
+        e.vx = Math.cos(tick/40 + e.x*0.01) * (0.7 + level*0.03);
+        e.vy = Math.sin(tick/50 + e.y*0.01) * 0.6;
+      }
+      e.x+=e.vx; e.y+=e.vy;
+    }
+  }
+
+  // Boss
+  if(boss){
+    const b=boss; b.timer++; b.vy += g;
+    const floor = platforms.find(p=>p.kind==="boss");
+    if(floor){
+      if(b.x < floor.x+10){ b.x=floor.x+10; b.vx=Math.abs(b.vx); }
+      if(b.x > floor.x+floor.w - b.w - 10){ b.x=floor.x+floor.w - b.w -10; b.vx=-Math.abs(b.vx); }
+    }
+    b.x += b.vx; collideWithPlatforms(b);
+    if(b.jumpCd>0) b.jumpCd--; if(b.onGround && b.jumpCd<=0){ b.vy=-10.5; b.jumpCd=Math.max(90, 180 - level*4); }
+    if(b.spawnCd>0) b.spawnCd--; if(b.spawnCd<=0){
+      enemies.push(spawnGoblin(b.x + rrange(-40,40), b.y+b.h, level));
+      if(rand()<0.6) enemies.push(spawnFlyer(b.x + rrange(-60,60), b.y - 40, level));
+      b.spawnCd = Math.max(120, 260 - level*6);
+    }
+    if(b.timer%240===0) addParticles(b.x+b.w/2, b.y, 30, "#ffdb5a");
+  }
+
+  // Bullet hits
+  for(const b of bullets) if(!b.dead && b.from==="player"){
+    const box={x:b.x-3,y:b.y-3,w:6,h:6};
+    if(boss && rectsOverlap(box,boss)){ boss.hp-=b.dmg; b.dead=true; player.shotsHit++; addParticles(boss.x+boss.w/2, boss.y+boss.h/2, 6, "#f55"); score+=2; }
+    for(const e of enemies){ if(!b.dead && rectsOverlap(box,e)){ e.hp-=b.dmg; b.dead=true; player.shotsHit++; addParticles(e.x+e.w/2,e.y+e.h/2,6,"#f77"); if(e.hp<=0){ e.dead=true; player.kills++; score+=e.value; if(rand()<0.12) pickups.push(spawnPickup(e.x,e.y-10)); } } }
+  }
+
+  // Enemy damage to player
+  function hurtPlayer(n){
+    if(player.armor>0){ player.armor--; addParticles(player.x+player.w/2, player.y+player.h/2, 8, "#9cf"); return; }
+    player.hp-=n; addParticles(player.x+player.w/2, player.y+player.h/2, 12, "#f33");
+    if(player.hp<=0){ onGameOver(); }
+  }
+  for(const e of enemies){ if(!e.dead && rectsOverlap(player,e)){ hurtPlayer(1); player.vx += Math.sign(player.x-e.x)*1.8; player.vy=-4; } }
+  if(boss && rectsOverlap(player,boss)){ hurtPlayer(2); player.vx += Math.sign(player.x-boss.x)*2.0; player.vy=-5; }
+
+  // Pickups
+  for(const p of pickups){
+    if(rectsOverlap(player,{x:p.x-8,y:p.y-8,w:16,h:16})){
+      p.dead=true;
+      if(p.type==="heal"){ player.hp=Math.min(player.maxHp, player.hp+1); flashMsg("+1 Heart"); addParticles(p.x,p.y,8,"#7fef7f"); score+=5; }
+      else if(p.type==="armor"){ player.armor=Math.min(5,player.armor+1); flashMsg("+1 Armor"); addParticles(p.x,p.y,10,"#9cf"); score+=8; }
+      else if(p.type==="weapon"){ weaponIndex=Math.max(weaponIndex,p.weapon); unlocks.add(WEAPONS[weaponIndex].name); flashMsg("Weapon: "+WEAPONS[weaponIndex].name); addParticles(p.x,p.y,12,"#6cf"); score+=12; }
+    }
+  }
+
+  bullets = bullets.filter(b=>!b.dead);
+  enemies = enemies.filter(e=>!e.dead);
+  pickups = pickups.filter(p=>!p.dead);
+  particles = particles.filter(pt=> --pt.life>0);
+
+  if(boss && boss.hp<=0){
+    addParticles(boss.x+boss.w/2, boss.y, 40, "#ffd76a"); pickups.push({x:boss.x+boss.w/2, y:boss.y-6, type:"crown"}); boss=null; score += 200 + level*25;
+  }
+  for(const p of pickups){
+    if(p.type==="crown" && rectsOverlap(player,{x:p.x-8,y:p.y-8,w:16,h:16})){
+      p.dead=true; crowns++; clearsThisRun++;
+      const timeSec=(performance.now()-startedAt)/1000; levelComplete({timeSec}); return;
+    }
+  }
+
+  cameraY = Math.max(0, Math.min(worldH - H, player.y - H*0.6));
+}
+
+/* =========================
+   Rendering
+========================= */
+function draw(){
+  const yOff=cameraY;
+  // parallax sky
+  const grad=ctx.createLinearGradient(0,0,0,H); grad.addColorStop(0,"#0b1020"); grad.addColorStop(1,"#090d14"); ctx.fillStyle=grad; ctx.fillRect(0,0,W,H);
+  // far parallax towers
+  ctx.globalAlpha=0.22;
+  for(let i=0;i<80;i++){ const bx=(i*97)%W; const by=((i*233)%(H+800)) - ((yOff*0.2)%(H+800)); ctx.fillStyle="#161f33"; ctx.fillRect(bx,by,38,38); }
+  ctx.globalAlpha=1;
+
+  // platforms
+  for(const p of platforms){
+    const y=p.y-yOff; if(y>H||y+p.h<-60) continue;
+    const img = p.kind==="boss" ? SPR.tileBoss : SPR.tile;
+    // tile stretch
+    for(let x=p.x; x<p.x+p.w; x+=img.width) ctx.drawImage(img, x|0, y|0);
+  }
+
+  // pickups
+  for(const s of pickups){
+    const y=s.y - yOff; if(y<-40||y>H+40) continue;
+    if(s.type==="heal") ctx.drawImage(SPR.heart, (s.x-8)|0, (y-7)|0);
+    else if(s.type==="armor") ctx.drawImage(SPR.shield, (s.x-6)|0, (y-8)|0);
+    else if(s.type==="weapon") ctx.drawImage(SPR.gem[s.weapon % SPR.gem.length], (s.x-6)|0, (y-6)|0);
+    else if(s.type==="crown") ctx.drawImage(SPR.crown, (s.x-14)|0, (y-10)|0);
+  }
+
+  // bullets
+  for(const b of bullets){ const y=b.y - yOff; if(y<-20||y>H+20) continue; ctx.drawImage(SPR.bullet, (b.x-3)|0, (y-3)|0); }
+
+  // enemies
+  for(const e of enemies){ const y=e.y - yOff; if(y<-50||y>H+50) continue;
+    ctx.drawImage(SPR.goblin, (e.x)|0, (y)|0);
+    if(e.type==="flyer"){ ctx.drawImage(SPR.flyWing, (e.x-10)|0, (y+4)|0); ctx.drawImage(SPR.flyWing, (e.x+22)|0, (y+4)|0); }
+    // hp bar
+    ctx.fillStyle="#300"; ctx.fillRect((e.x-10)|0, (y-8)|0, 20,3); ctx.fillStyle="#d33"; ctx.fillRect((e.x-10)|0, (y-8)|0, (20*(e.hp/e.maxHp))|0, 3);
+  }
+
+  // boss
+  if(boss){ const y=boss.y - yOff; ctx.drawImage(SPR.boss, boss.x|0, y|0); ctx.drawImage(SPR.crown, (boss.x+6)|0, (y-12)|0);
+    ctx.fillStyle="#331b1b"; ctx.fillRect(20,20, W-40, 8); ctx.fillStyle="#f65"; ctx.fillRect(20,20, ((W-40)*(boss.hp/Math.max(1,boss.maxHp)))|0, 8); ctx.strokeStyle="#5a2"; ctx.lineWidth=1; ctx.strokeRect(20.5,20.5,W-41,7);
+  }
+
+  // player
+  ctx.drawImage(SPR.player, player.x|0, (player.y - yOff)|0);
+
+  // particles
+  for(const pt of particles){ const y=pt.y-yOff; ctx.globalAlpha=Math.max(0, pt.life/60); ctx.fillStyle=pt.col; ctx.fillRect(pt.x|0, y|0, 2,2); ctx.globalAlpha=1; pt.x+=pt.vx; pt.y+=pt.vy; pt.vy+=0.05; }
+
+  // HUD
+  hud.innerHTML = `
+    <span class="chip">L${level}</span>
+    <span class="chip">👑 ${crowns}</span>
+    <span class="chip">❤ ${player.hp}/${player.maxHp}  ⛨ ${player.armor}</span>
+    <span class="chip">Weapon: ${WEAPONS[weaponIndex].name}</span>
+    <span class="chip">Score: ${score}</span>
+  `;
+}
+
+/* =========================
+   Flow / UI
+========================= */
+function flashMsg(txt){ msg.textContent=txt; msg.style.opacity="1"; msg.style.transition="none"; requestAnimationFrame(()=>{ msg.style.transition="opacity 1.2s ease"; msg.style.opacity="0.0"; }); }
+function updateMenu(){ const s=loadState(); renderBoard(board); $id("btnContinue").disabled=!s; menu.hidden=false; levelOver.hidden=true; gameOver.hidden=true; }
+function startNew(){
+  level=1; crowns=0; score=0; clearsThisRun=0; startedAt=performance.now(); weaponIndex=0; unlocks=new Set(["Gun"]);
+  player.hp=player.maxHp=3; player.armor=0; seed=(Math.random()*1e9)|0; generateLevel(level);
+  gamePaused=false; menu.hidden=true; levelOver.hidden=true; gameOver.hidden=true; flashMsg("Good luck!");
+}
+function continueRun(){
+  const s=loadState(); if(!s) return startNew();
+  level=s.level; crowns=s.crowns; score=s.score; startedAt=performance.now(); clearsThisRun=0; seed=s.rngSeed||((Math.random()*1e9)|0);
+  unlocks=new Set(s.unlocks||["Gun"]); weaponIndex=s.player?.weaponIndex||0; player.hp=s.player?.hp||3; player.maxHp=s.player?.maxHp||3; player.armor=s.player?.armor||0;
+  generateLevel(level); gamePaused=false; menu.hidden=true; levelOver.hidden=true; gameOver.hidden=true; flashMsg("Welcome back!");
+}
+function levelComplete({timeSec}){ gamePaused=true; saveState();
+  $id("levelTitle").textContent=`👑 Boss Down! Level ${level} Cleared`;
+  const acc = player.shotsFired? Math.round(100*player.shotsHit/player.shotsFired) : 0;
+  const bonus = Math.max(0, 220 - Math.round(timeSec)) + 60*level + 120; score += bonus;
+  $id("levelStats").innerHTML = `Crowns: ${crowns} &nbsp;|&nbsp; Score: ${score} &nbsp;|&nbsp; Time: ${timeSec.toFixed(1)}s &nbsp;|&nbsp; Accuracy: ${acc}%<br><span class="small">Bonus for speed+level: +${bonus}</span>`;
+  levelOver.hidden=false; menu.hidden=true; gameOver.hidden=true;
+}
+function nextLevel(){ level++; generateLevel(level); gamePaused=false; levelOver.hidden=true; }
+function onGameOver(){
+  gamePaused=true; const t=(performance.now()-startedAt)/1000; submitScore("You", score, crowns, level, t); renderBoard(board2);
+  $id("finalStats").innerHTML = `Score: <strong>${score}</strong> &nbsp;|&nbsp; Crowns: ${crowns} &nbsp;|&nbsp; Level: ${level} &nbsp;|&nbsp; Time: ${t.toFixed(1)}s`;
+  gameOver.hidden=false; menu.hidden=true; levelOver.hidden=true; wipeState();
+}
+
+// Buttons
+$id("btnStart").onclick=startNew; $id("btnContinue").onclick=continueRun; $id("btnWipe").onclick=()=>{ wipeState(); flashMsg("Save cleared"); };
+$id("btnNext").onclick=nextLevel; $id("btnQuit").onclick=()=>{ gamePaused=true; updateMenu(); };
+$id("btnRestart").onclick=startNew; $id("btnBack").onclick=()=>{ gamePaused=true; updateMenu(); };
+
+// Show menu initially
+updateMenu();
+
+/* =========================
+   Main Loop
+========================= */
+function frame(){ if(!gamePaused){ update(); saveState(); } draw(); requestAnimationFrame(frame); }
+frame();
+
+})();</script>
+</body>
+</html>
