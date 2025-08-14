@@ -1,0 +1,895 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<title>Crownclimber: Goblin Spire</title>
+<style>
+  html,body { margin:0; height:100%; background:#0a0e14; color:#d6e1ff; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif; }
+  #ui { position:fixed; inset:0; pointer-events:none; }
+  .panel {
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    background:rgba(10,14,20,.9); border:2px solid #3e4a66; border-radius:12px; padding:18px; width:min(92vw,720px);
+    pointer-events:auto; box-shadow:0 20px 50px rgba(0,0,0,.5);
+  }
+  .panel h1 { margin:0 0 8px; font-size:28px; letter-spacing:.5px; }
+  .panel h2 { margin:12px 0 8px; font-size:18px; opacity:.9 }
+  .panel p { margin:6px 0; line-height:1.35; opacity:.9 }
+  .row { display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }
+  button {
+    appearance:none; border:0; border-radius:10px; padding:10px 14px; font-weight:700; cursor:pointer;
+    background:#5a7dff; color:#fff; box-shadow:0 8px 18px rgba(90,125,255,.35);
+  }
+  button.secondary { background:#243044; color:#bcd1ff; box-shadow:none; border:1px solid #3e4a66 }
+  button:active { transform:translateY(1px); }
+  #hud { position:fixed; left:10px; top:10px; font-weight:700; text-shadow:0 2px 0 #0008; pointer-events:none; }
+  #hud .chip { display:inline-block; background:#111a; padding:6px 10px; margin:0 6px 6px 0; border:1px solid #2b3550; border-radius:8px }
+  #msg { position:fixed; left:50%; transform:translateX(-50%); bottom:16px; background:#111a; padding:6px 10px; border:1px solid #2b3550; border-radius:8px; pointer-events:none; font-size:12px; opacity:.8 }
+  canvas { display:block; width:100vw; height:100vh; image-rendering: pixelated; touch-action:none; }
+  .kbd { display:inline-block; padding:0 6px; border:1px solid #3e4a66; border-radius:6px; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size:12px; background:#0c1220; }
+  .small { font-size:12px; opacity:.8 }
+  .right { float:right; opacity:.8; font-size:12px; }
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Crownclimber canvas"></canvas>
+<div id="hud" role="status" aria-live="polite"></div>
+<div id="msg">Move with mouse/finger. Click/Tap to jump. Your shots bounce. Defeat the Goblin King at the top!</div>
+
+<div id="ui">
+  <div id="menu" class="panel" hidden>
+    <h1>👑 Crownclimber: Goblin Spire</h1>
+    <p>Ascend the randomly-generated spire. Goblins swarm. A crowned King waits at the top. Shots are bouncy blue orbs. Double-jump. Collect armor & weapons. Beat the boss, grab the crown, climb again.</p>
+    <div class="row">
+      <button id="btnStart">New Run</button>
+      <button id="btnContinue" class="secondary">Continue</button>
+      <button id="btnWipe" class="secondary">Reset Save</button>
+    </div>
+    <h2>How to play</h2>
+    <p>• Move: move your mouse or drag a finger — your hero runs toward it. <span class="right small">Keyboard fallback: <span class="kbd">A</span>/<span class="kbd">D</span> or ⬅️/➡️</span></p>
+    <p>• Jump: click / tap (double-jump enabled). <span class="right small">Keyboard: <span class="kbd">Space</span> / <span class="kbd">W</span> / ⬆️</span></p>
+    <p>• Aim: your shots track your pointer.</p>
+    <p class="small">Local save + leaderboard stored in your browser. No servers, no tracking.</p>
+    <h2>Local Leaderboard</h2>
+    <div id="board"></div>
+  </div>
+
+  <div id="levelOver" class="panel" hidden>
+    <h1 id="levelTitle">Level Complete</h1>
+    <p id="levelStats"></p>
+    <div class="row">
+      <button id="btnNext">Continue</button>
+      <button id="btnQuit" class="secondary">Quit to Menu</button>
+    </div>
+  </div>
+
+  <div id="gameOver" class="panel" hidden>
+    <h1>💀 Game Over</h1>
+    <p id="finalStats"></p>
+    <div class="row">
+      <button id="btnRestart">New Run</button>
+      <button id="btnBack" class="secondary">Menu</button>
+    </div>
+    <h2>Local Leaderboard</h2>
+    <div id="board2"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---------- Canvas / Context ----------
+  const DPR = Math.max(1, Math.min(2, devicePixelRatio || 1));
+  const canvas = document.getElementById("game");
+  const ctx = canvas.getContext("2d");
+  let W = 0, H = 0;
+  function resize() {
+    W = Math.floor(innerWidth * DPR);
+    H = Math.floor(innerHeight * DPR);
+    canvas.width = W; canvas.height = H;
+  }
+  addEventListener("resize", resize, {passive:true}); resize();
+
+  // ---------- UI helpers ----------
+  const hud = document.getElementById("hud");
+  const menu = document.getElementById("menu");
+  const levelOver = document.getElementById("levelOver");
+  const gameOver = document.getElementById("gameOver");
+  const board = document.getElementById("board");
+  const board2 = document.getElementById("board2");
+  const msg = document.getElementById("msg");
+
+  const $ = sel => document.querySelector(sel);
+  const $id = id => document.getElementById(id);
+
+  // ---------- RNG ----------
+  let seed = Math.floor(Math.random()*1e9);
+  function rand() { // LCG
+    seed = (seed * 1664525 + 1013904223) % 0x100000000;
+    return seed / 0x100000000;
+  }
+  const rrange = (a,b) => a + rand()*(b-a);
+  const rpick = arr => arr[(rand()*arr.length)|0];
+
+  // ---------- Local Save ----------
+  const SAVE_KEY = "crownclimber_save_v1";
+  const SCORE_KEY = "crownclimber_scores_v1";
+  function saveState() {
+    const data = {
+      run: { level, crowns, score, startedAt, rngSeed: seed, weaponsUnlocked:[...unlocks] },
+      player: { hp: player.hp, maxHp: player.maxHp, armor: player.armor, weaponIndex: weaponIndex },
+    };
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  }
+  function loadState() {
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if(!raw) return null;
+      return JSON.parse(raw);
+    } catch(e){ return null; }
+  }
+  function wipeState() { localStorage.removeItem(SAVE_KEY); updateMenu(); }
+  function submitScore(name, score, crowns, level, timeSec) {
+    const entry = { name, score, crowns, level, timeSec, when: Date.now() };
+    const list = JSON.parse(localStorage.getItem(SCORE_KEY) || "[]");
+    list.push(entry);
+    list.sort((a,b) => b.score - a.score);
+    localStorage.setItem(SCORE_KEY, JSON.stringify(list.slice(0,10)));
+  }
+  function renderBoard(el) {
+    const list = JSON.parse(localStorage.getItem(SCORE_KEY) || "[]");
+    if (!list.length) { el.innerHTML = "<p class='small'>No scores yet. Good luck!</p>"; return; }
+    el.innerHTML = "<ol style='margin:6px 0 0 18px; padding:0'>" + list.map(e => {
+      const d = new Date(e.when);
+      const mm = String(d.getMonth()+1).padStart(2,"0");
+      const dd = String(d.getDate()).padStart(2,"0");
+      const date = `${d.getFullYear()}-${mm}-${dd}`;
+      return `<li><strong>${(e.name||"You")}</strong> — <em>${e.score}</em> pts · 👑 ${e.crowns} · L${e.level} · ${Math.round(e.timeSec)}s <span class="small" style="opacity:.6">(${date})</span></li>`;
+    }).join("") + "</ol>";
+  }
+
+  // ---------- Input ----------
+  const input = {
+    pointerX: W/2, pointerY: H/2, wantJump:false, left:false, right:false,
+    touchId: null, lastJumpTap: 0
+  };
+  addEventListener("mousemove", e => {
+    const rect = canvas.getBoundingClientRect();
+    input.pointerX = (e.clientX - rect.left) * DPR;
+    input.pointerY = (e.clientY - rect.top) * DPR;
+  }, {passive:true});
+  addEventListener("mousedown", e => {
+    if (e.button===0) input.wantJump = true;
+  });
+  addEventListener("mouseup", e => {
+    if (e.button===0) input.wantJump = false;
+  });
+  // Touch: drag to move pointer; tap to jump
+  canvas.addEventListener("touchstart", e => {
+    const t = e.changedTouches[0];
+    input.touchId = t.identifier;
+    const rect = canvas.getBoundingClientRect();
+    input.pointerX = (t.clientX - rect.left) * DPR;
+    input.pointerY = (t.clientY - rect.top) * DPR;
+    input.wantJump = true;
+    input.lastJumpTap = performance.now();
+    e.preventDefault();
+  }, {passive:false});
+  canvas.addEventListener("touchmove", e => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === input.touchId) {
+        const rect = canvas.getBoundingClientRect();
+        input.pointerX = (t.clientX - rect.left) * DPR;
+        input.pointerY = (t.clientY - rect.top) * DPR;
+        break;
+      }
+    }
+    e.preventDefault();
+  }, {passive:false});
+  canvas.addEventListener("touchend", e => {
+    for (const t of e.changedTouches) {
+      if (t.identifier === input.touchId) {
+        input.wantJump = false;
+        input.touchId = null;
+        break;
+      }
+    }
+    e.preventDefault();
+  }, {passive:false});
+
+  // Keyboard fallback
+  addEventListener("keydown", e => {
+    if (["ArrowLeft","a","A"].includes(e.key)) input.left = true;
+    if (["ArrowRight","d","D"].includes(e.key)) input.right = true;
+    if (["ArrowUp","w","W"," "].includes(e.key)) input.wantJump = true;
+  });
+  addEventListener("keyup", e => {
+    if (["ArrowLeft","a","A"].includes(e.key)) input.left = false;
+    if (["ArrowRight","d","D"].includes(e.key)) input.right = false;
+    if (["ArrowUp","w","W"," "].includes(e.key)) input.wantJump = false;
+  });
+
+  // ---------- Game State ----------
+  let level = 1;
+  let crowns = 0;
+  let score = 0;
+  let startedAt = performance.now();
+  let cameraY = 0;
+  let worldH = 4000; // will be set per-level
+  let platforms = [];
+  let pickups = [];
+  let enemies = [];
+  let bullets = [];
+  let particles = [];
+  let boss = null;
+  let gamePaused = true;
+  let clearsThisRun = 0;
+  let unlocks = new Set(["Gun"]); // seen weapons
+  let weaponIndex = 0;
+
+  // Weapons
+  const WEAPONS = [
+    {name:"Gun",          rate: 7,  bulletSpeed: 9,  damage:1, spread:0.02, multishot:1, bounce:2},
+    {name:"Cannon",       rate: 4,  bulletSpeed: 7,  damage:2, spread:0.02, multishot:1, bounce:3},
+    {name:"Machine Gun",  rate: 12, bulletSpeed: 10, damage:1, spread:0.05, multishot:1, bounce:2},
+    {name:"Tri-Shot",     rate: 8,  bulletSpeed: 9,  damage:1, spread:0.15, multishot:3, bounce:2},
+    {name:"Power Blaster",rate: 5,  bulletSpeed: 12, damage:3, spread:0.03, multishot:1, bounce:4},
+    {name:"Orb Storm",    rate: 16, bulletSpeed: 8,  damage:1, spread:0.6,  multishot:6, bounce:3},
+  ];
+
+  // Player
+  const player = {
+    x: 100, y: 0, w: 24, h: 28,
+    vx: 0, vy: 0,
+    onGround: false, jumps: 2, maxJumps: 2,
+    hp: 3, maxHp: 3, armor: 0,
+    fireCooldown: 0,
+    kills: 0, shotsFired: 0, shotsHit: 0,
+  };
+
+  // ---------- Level Generation ----------
+  function generateLevel(n) {
+    platforms = [];
+    pickups = [];
+    enemies = [];
+    bullets = [];
+    particles = [];
+    boss = null;
+
+    // Difficulty scaling
+    const heightPerLevel = 2600 + (n-1)*300;
+    worldH = Math.min(8000, heightPerLevel);
+    const platCount = Math.min(100, 36 + (n-1)*6);
+    const laneW = Math.max(180, 320 - n*5);
+    const minGapY = 110;
+    const maxGapY = 160 + Math.max(0, 40 - n*2);
+    const maxHorizDelta = 260; // reachable with double jump + air control
+    const baseY = 200;
+
+    // Ground
+    platforms.push({x:0, y:worldH-24, w:2000, h:24, kind:"ground"});
+
+    // Ascending platforms up the spire; ensure reachability with controlled gaps
+    let lastX = 120;
+    let lastY = worldH - 120;
+    for (let i=0;i<platCount;i++) {
+      const gapY = rrange(minGapY, maxGapY);
+      const y = Math.max(baseY, lastY - gapY);
+      let x = Math.max(40, Math.min(W + 600, lastX + rrange(-maxHorizDelta, maxHorizDelta)));
+      const w = rrange(90, 170);
+      platforms.push({x, y, w, h:18, kind:"platform"});
+      // Chance to insert a small middle step to guarantee reach
+      if (rand() < 0.25) {
+        const midY = (y + lastY)/2;
+        const midX = (x + lastX)/2 + rrange(-40,40);
+        platforms.push({x: midX, y: midY, w: rrange(60,110), h: 14, kind:"step"});
+      }
+      lastX = x; lastY = y;
+
+      // Place reachable goodies on or near this platform
+      if (rand() < 0.25) pickups.push(spawnPickup(x + w*rrange(.15,.85), y - 20));
+      // Ground goblins
+      if (rand() < (0.35 + n*0.02)) enemies.push(spawnGoblin(x + w*0.5, y - 16, n));
+      // Flying goblins patrol a vertical band
+      if (rand() < (0.18 + n*0.02)) enemies.push(spawnFlyer(x + w*0.5 + rrange(-120,120), y - rrange(80,140), n));
+    }
+
+    // Boss platform at top
+    const bossPlat = {x:lastX-40, y:Math.max(120, lastY - 140), w: 320, h: 20, kind:"boss"};
+    platforms.push(bossPlat);
+
+    // Ensure some weapon pickups before boss
+    for (let i=1;i<Math.min(WEAPONS.length, 2 + Math.floor(n/2)); i++) {
+      const p = platforms[(platCount * (i/(Math.min(WEAPONS.length-1, 5)+1)))|0];
+      pickups.push({x: p.x + p.w*0.5, y: p.y - 22, type:"weapon", weapon:i});
+    }
+
+    // Armor pickup near mid and top
+    const mid = platforms[(platCount/2)|0];
+    pickups.push({x: mid.x + mid.w*0.5, y: mid.y - 20, type:"armor"});
+    pickups.push({x: bossPlat.x + bossPlat.w-40, y: bossPlat.y - 20, type:"armor"});
+
+    // Boss
+    boss = spawnBoss(bossPlat.x + bossPlat.w/2, bossPlat.y - 28, n);
+
+    // Player start
+    player.x = 120; player.y = worldH - 100;
+    player.vx = 0; player.vy = 0; player.onGround = false; player.jumps = player.maxJumps;
+
+    // Camera start
+    cameraY = Math.max(0, worldH - H);
+
+    // HUD
+    flashMsg("Level " + n + " — reach the crown!");
+  }
+
+  // ---------- Entities ----------
+  function spawnPickup(x,y) {
+    const t = rand();
+    if (t < 0.5) return {x,y,type:"heal"};        // +1 HP
+    if (t < 0.8) return {x,y,type:"armor"};       // +1 Armor
+    return {x, y, type:"weapon", weapon: Math.min(WEAPONS.length-1, (rand()*WEAPONS.length)|0) };
+  }
+  function spawnGoblin(x,y,n) {
+    const speed = 0.7 + Math.min(1.8, n*0.05);
+    const hp = 2 + Math.floor(n*0.25);
+    return {type:"goblin", x,y, vx: (rand()<.5?speed:-speed), vy:0, w:22, h:24, hp, maxHp:hp, onGround:false, timer:0, value: 20 + n*2};
+  }
+  function spawnFlyer(x,y,n) {
+    const speed = 1.0 + Math.min(2.2, n*0.06);
+    const hp = 2 + Math.floor(n*0.2);
+    return {type:"flyer", x,y, vx:speed, vy:0, w:22, h:20, hp, maxHp:hp, timer:0, value: 25 + n*3, swoopCooldown: 180};
+  }
+  function spawnBoss(x,y,n) {
+    const hp = 30 + n*18;
+    return {type:"boss", x,y, w:40, h:34, hp, maxHp:hp, vx:0.8 + n*0.05, vy:0, onGround:false, timer:0, crown:true, phase:0, spawnCd: 240, jumpCd: 140};
+  }
+
+  function addParticles(x,y, n, col) {
+    for(let i=0;i<n;i++) {
+      particles.push({x,y, vx: rrange(-2,2), vy: rrange(-2,1), life: 40 + (rand()*20|0), col});
+    }
+  }
+
+  // ---------- Collision / World ----------
+  function rectsOverlap(a,b) { return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y; }
+  function collideWithPlatforms(body) {
+    // Simple AABB + vertical resolve first, then horizontal
+    body.onGround = false;
+    // Vertical
+    body.y += body.vy;
+    for (const p of platforms) {
+      if (!rectsOverlap(body, p)) continue;
+      if (body.vy > 0 && body.y + body.h > p.y && body.y + body.h - body.vy <= p.y) { // landed
+        body.y = p.y - body.h;
+        body.vy = 0; body.onGround = true;
+      } else if (body.vy < 0 && body.y < p.y + p.h && body.y - body.vy >= p.y + p.h) { // head bump
+        body.y = p.y + p.h;
+        body.vy = 0;
+      }
+    }
+    // Horizontal
+    body.x += body.vx;
+    for (const p of platforms) {
+      if (!rectsOverlap(body, p)) continue;
+      if (body.vx > 0) body.x = p.x - body.w;
+      else if (body.vx < 0) body.x = p.x + p.w;
+      body.vx = 0;
+    }
+  }
+
+  // ---------- Gameplay Update ----------
+  let tick = 0;
+  function update() {
+    tick++;
+
+    // Target horizontal by pointer or keys
+    const targetX = input.pointerX;
+    const wantLeft = input.left, wantRight = input.right;
+    const runSpeed = 2.1;
+    const accel = 0.4;
+    let desired = 0;
+    if (Math.abs(targetX - player.x) > 6) desired = Math.sign(targetX - player.x) * runSpeed;
+    if (wantLeft) desired = -runSpeed;
+    if (wantRight) desired = runSpeed;
+    player.vx += Math.max(-accel, Math.min(accel, desired - player.vx));
+
+    // Gravity
+    const g = 0.45;
+    player.vy += g;
+    // Jump
+    if (input.wantJump && (player.onGround || player.jumps>0)) {
+      player.vy = -7.9;
+      if (!player.onGround) player.jumps--;
+      input.wantJump = false; // single consume
+      addParticles(player.x + player.w/2, player.y + player.h, 10, "#6cf");
+    }
+    if (player.onGround) player.jumps = player.maxJumps;
+
+    // Collide
+    collideWithPlatforms(player);
+
+    // Auto-fire toward pointer
+    const weapon = WEAPONS[weaponIndex];
+    if (player.fireCooldown > 0) player.fireCooldown--;
+    const aimAng = Math.atan2((input.pointerY - (player.y+player.h/2)), (input.pointerX - (player.x+player.w/2)));
+    if (player.fireCooldown <= 0) {
+      for (let i=0;i<weapon.multishot;i++) {
+        const a = aimAng + rrange(-weapon.spread, weapon.spread);
+        const speed = weapon.bulletSpeed;
+        bullets.push({
+          x: player.x + player.w/2 + Math.cos(a)*12, y: player.y + player.h/2 + Math.sin(a)*8,
+          vx: Math.cos(a)*speed, vy: Math.sin(a)*speed,
+          r: 4, dmg: weapon.damage, bounces: weapon.bounce, from:"player"
+        });
+        player.shotsFired++;
+      }
+      player.fireCooldown = Math.max(2, Math.floor(60/weapon.rate));
+    }
+
+    // Bullets
+    for (const b of bullets) {
+      b.x += b.vx; b.y += b.vy;
+      // Bounce off walls and platforms
+      // world bounds
+      if (b.x < 0 && b.vx<0) { b.x=0; b.vx*=-1; b.bounces--; }
+      if (b.x > W && b.vx>0) { b.x=W; b.vx*=-1; b.bounces--; }
+      if (b.y < 0 && b.vy<0) { b.y=0; b.vy*=-1; b.bounces--; }
+      if (b.y > worldH && b.vy>0) { b.y=worldH; b.vy*=-1; b.bounces--; }
+      for (const p of platforms) {
+        if (b.x > p.x-2 && b.x < p.x + p.w + 2 && b.y > p.y-2 && b.y < p.y + p.h + 2) {
+          // reflect the predominant axis
+          const insideX = Math.min(b.x - p.x, (p.x+p.w) - b.x);
+          const insideY = Math.min(b.y - p.y, (p.y+p.h) - b.y);
+          if (insideX < insideY) { b.vx *= -1; }
+          else { b.vy *= -1; }
+          b.bounces--;
+          break;
+        }
+      }
+      b.dead = b.bounces < 0;
+    }
+
+    // Enemies
+    for (const e of enemies) {
+      e.timer++;
+
+      if (e.type === "goblin") {
+        e.vy += g*0.9;
+        // simple AI: pace, turn on ledge
+        if (e.onGround && (rand()<0.01)) e.vx *= -1;
+        // ledge detect
+        if (e.onGround) {
+          const ahead = {x: e.x + Math.sign(e.vx)*12, y: e.y + e.h + 2, w:2, h:2};
+          let support = false;
+          for (const p of platforms) if (rectsOverlap(ahead, p)) { support=true; break; }
+          if (!support) e.vx *= -1;
+        }
+        collideWithPlatforms(e);
+      }
+      else if (e.type === "flyer") {
+        // patrol with gentle sine; swoop toward player sometimes
+        const dx = (player.x - e.x), dy = (player.y - e.y);
+        const dist = Math.hypot(dx,dy);
+        if (e.swoopCooldown>0) e.swoopCooldown--;
+        if (e.swoopCooldown<=0 && dist<280 && rand()<0.03) {
+          const a = Math.atan2(dy,dx);
+          e.vx = Math.cos(a) * (1.8 + Math.min(2.2, level*0.1));
+          e.vy = Math.sin(a) * (1.8 + Math.min(2.2, level*0.1));
+          e.swoopCooldown = 120 + (rand()*90|0);
+        } else {
+          e.vx = Math.cos(tick/40 + e.x*0.01) * (0.7 + level*0.03);
+          e.vy = Math.sin(tick/50 + e.y*0.01) * 0.6;
+        }
+        e.x += e.vx; e.y += e.vy;
+      }
+    }
+
+    // Boss AI
+    if (boss) {
+      const b = boss;
+      b.timer++;
+      b.vy += g;
+      // Move side to side on boss platform bounds
+      const floor = platforms.find(p => p.kind==="boss");
+      if (floor) {
+        // reverse near edges
+        if (b.x < floor.x+10) { b.x = floor.x+10; b.vx = Math.abs(b.vx); }
+        if (b.x > floor.x+floor.w- b.w -10) { b.x = floor.x+floor.w - b.w -10; b.vx = -Math.abs(b.vx); }
+      }
+      b.x += b.vx;
+      collideWithPlatforms(b);
+
+      // Periodic big jump + slam
+      if (b.jumpCd>0) b.jumpCd--;
+      if (b.onGround && b.jumpCd<=0) {
+        b.vy = -10.5;
+        b.jumpCd = Math.max(90, 180 - level*4);
+      }
+      // Spawn adds
+      if (b.spawnCd>0) b.spawnCd--;
+      if (b.spawnCd<=0) {
+        enemies.push(spawnGoblin(b.x + rrange(-40,40), b.y + b.h, level));
+        if (rand()<0.6) enemies.push(spawnFlyer(b.x + rrange(-60,60), b.y - 40, level));
+        b.spawnCd = Math.max(120, 260 - level*6);
+      }
+      // Occasional crown beam (visual only shockwave)
+      if (b.timer % 240 === 0) {
+        addParticles(b.x+b.w/2, b.y, 30, "#ffdb5a");
+      }
+    }
+
+    // Bullet / enemy collisions
+    for (const b of bullets) if (!b.dead && b.from === "player") {
+      // Boss
+      if (boss && !b.dead) {
+        const box = {x: b.x-3, y:b.y-3, w:6, h:6};
+        if (rectsOverlap(box, boss)) {
+          boss.hp -= b.dmg; b.dead=true; player.shotsHit++;
+          addParticles(boss.x+boss.w/2, boss.y+boss.h/2, 6, "#f55");
+          score += 2;
+        }
+      }
+      // Enemies
+      for (const e of enemies) if (!b.dead) {
+        const box = {x: b.x-3, y:b.y-3, w:6, h:6};
+        if (rectsOverlap(box, e)) {
+          e.hp -= b.dmg; b.dead=true; player.shotsHit++;
+          addParticles(e.x+e.w/2, e.y+e.h/2, 6, "#f77");
+          if (e.hp<=0) {
+            e.dead = true; player.kills++;
+            score += e.value;
+            if (rand()<0.12) pickups.push(spawnPickup(e.x, e.y-10));
+          }
+        }
+      }
+    }
+
+    // Enemy / player damage
+    function hurtPlayer(amount) {
+      if (player.armor>0) { player.armor--; addParticles(player.x+player.w/2, player.y+player.h/2, 8, "#9cf"); return; }
+      player.hp -= amount;
+      addParticles(player.x+player.w/2, player.y+player.h/2, 12, "#f33");
+      if (player.hp<=0) {
+        // game over
+        onGameOver();
+        return;
+      }
+    }
+    for (const e of enemies) {
+      if (e.dead) continue;
+      if (rectsOverlap(player, e)) {
+        hurtPlayer(1);
+        // small knockback
+        player.vx += Math.sign(player.x - e.x) * 1.8;
+        player.vy = -4;
+      }
+    }
+    if (boss && rectsOverlap(player, boss)) {
+      hurtPlayer(2);
+      player.vx += Math.sign(player.x - boss.x) * 2.0;
+      player.vy = -5;
+    }
+
+    // Pickups
+    for (const p of pickups) {
+      if (rectsOverlap(player, {x:p.x-8,y:p.y-8,w:16,h:16})) {
+        p.dead = true;
+        if (p.type==="heal") { player.hp = Math.min(player.maxHp, player.hp+1); flashMsg("+1 Heart"); addParticles(p.x,p.y,8,"#7fef7f"); score+=5; }
+        else if (p.type==="armor") { player.armor = Math.min(5, player.armor+1); flashMsg("+1 Armor"); addParticles(p.x,p.y,10,"#9cf"); score+=8; }
+        else if (p.type==="weapon") {
+          weaponIndex = Math.max(weaponIndex, p.weapon);
+          unlocks.add(WEAPONS[weaponIndex].name);
+          flashMsg("Weapon: " + WEAPONS[weaponIndex].name);
+          addParticles(p.x,p.y,12,"#6cf"); score+=12;
+        }
+      }
+    }
+
+    // Cleanup bullets/particles/enemies/pickups
+    bullets = bullets.filter(b => !b.dead);
+    enemies = enemies.filter(e => !e.dead);
+    pickups = pickups.filter(p => !p.dead);
+    particles = particles.filter(pt => --pt.life > 0);
+
+    // Boss death?
+    if (boss && boss.hp<=0) {
+      addParticles(boss.x+boss.w/2, boss.y, 40, "#ffd76a");
+      // Crown drop
+      pickups.push({x: boss.x+boss.w/2, y: boss.y - 6, type:"crown"});
+      boss = null;
+      score += 200 + level*25;
+    }
+    // Crown pickup -> next level
+    for (const p of pickups) {
+      if (p.type==="crown" && rectsOverlap(player, {x:p.x-8,y:p.y-8,w:16,h:16})) {
+        p.dead = true;
+        crowns++; clearsThisRun++;
+        const timeSec = (performance.now() - startedAt)/1000;
+        levelComplete({timeSec});
+        return;
+      }
+    }
+
+    // Camera follows up
+    cameraY = Math.max(0, Math.min(worldH - H, player.y - H*0.6));
+  }
+
+  // ---------- Rendering ----------
+  function draw() {
+    // Parallax background with pixel motifs
+    ctx.clearRect(0,0,W,H);
+    const yOff = cameraY;
+    // sky gradient
+    const grad = ctx.createLinearGradient(0,0,0,H);
+    grad.addColorStop(0, "#0b1020");
+    grad.addColorStop(1, "#0a0e14");
+    ctx.fillStyle = grad; ctx.fillRect(0,0,W,H);
+
+    // far parallax "city" of blocks
+    ctx.globalAlpha = 0.25;
+    for (let i=0;i<60;i++) {
+      const bx = (i*97 % W);
+      const by = ((i*233)% (H+800)) - ((yOff*0.2)% (H+800));
+      ctx.fillStyle = "#172035";
+      ctx.fillRect(bx, by, 40, 40);
+    }
+    ctx.globalAlpha = 1;
+
+    // draw stylized pixel blocks (tile outlines) for each platform
+    for (const p of platforms) {
+      const x = p.x, y = p.y - yOff;
+      if (y > H || y + p.h < -60) continue;
+
+      drawPixelBlock(x, y, p.w, p.h, p.kind==="boss" ? "#364a7a" : p.kind==="ground" ? "#243655" : "#2b3d63");
+    }
+
+    // pickups
+    for (const s of pickups) {
+      const y = s.y - yOff;
+      if (y<-40 || y>H+40) continue;
+      if (s.type==="heal") drawHeart(s.x, y);
+      else if (s.type==="armor") drawShield(s.x, y);
+      else if (s.type==="weapon") drawWeaponGem(s.x, y, s.weapon);
+      else if (s.type==="crown") drawCrown(s.x, y);
+    }
+
+    // bullets
+    for (const b of bullets) {
+      const y = b.y - yOff;
+      if (y<-20 || y>H+20) continue;
+      ctx.beginPath();
+      ctx.arc(b.x, y, b.r, 0, Math.PI*2);
+      ctx.fillStyle = "#55b7ff";
+      ctx.fill();
+      // tail
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath();
+      ctx.arc(b.x - b.vx*0.4, y - b.vy*0.4, Math.max(1,b.r-1), 0, Math.PI*2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // enemies
+    for (const e of enemies) {
+      const y = e.y - yOff;
+      if (y<-50 || y>H+50) continue;
+      drawGoblin(e.x, y, e.type==="flyer");
+      // tiny hp bar
+      ctx.fillStyle = "#400";
+      ctx.fillRect(e.x-10, y-10, 20, 3);
+      ctx.fillStyle = "#d33";
+      ctx.fillRect(e.x-10, y-10, 20*(e.hp/e.maxHp), 3);
+    }
+
+    // boss
+    if (boss) {
+      const y = boss.y - yOff;
+      drawBoss(boss.x, y);
+      // hp bar
+      ctx.fillStyle = "#331b1b";
+      ctx.fillRect(20, 20, W-40, 8);
+      ctx.fillStyle = "#f65";
+      ctx.fillRect(20, 20, (W-40)*(boss.hp/Math.max(1,boss.maxHp)), 8);
+      ctx.strokeStyle = "#5a2"; ctx.lineWidth = 1; ctx.strokeRect(20.5, 20.5, W-41, 7);
+    }
+
+    // player
+    drawPlayer(player.x, player.y - yOff);
+
+    // particles
+    for (const pt of particles) {
+      const y = pt.y - yOff;
+      ctx.globalAlpha = Math.max(0, pt.life/60);
+      ctx.fillStyle = pt.col;
+      ctx.fillRect(pt.x|0, y|0, 2,2);
+      ctx.globalAlpha = 1;
+      pt.x += pt.vx; pt.y += pt.vy; pt.vy += 0.05;
+    }
+
+    // HUD
+    hud.innerHTML = `
+      <span class="chip">L${level}</span>
+      <span class="chip">👑 ${crowns}</span>
+      <span class="chip">❤ ${player.hp}/${player.maxHp}  ⛨ ${player.armor}</span>
+      <span class="chip">Weapon: ${WEAPONS[weaponIndex].name}</span>
+      <span class="chip">Score: ${score}</span>
+    `;
+  }
+
+  function drawPixelBlock(x,y,w,h, base="#2b3d63") {
+    // body
+    ctx.fillStyle = base;
+    ctx.fillRect(x|0, y|0, w|0, h|0);
+    // inner grid pixels
+    ctx.fillStyle = "#1c2944";
+    for (let i=4;i<w-4;i+=8) ctx.fillRect((x+i)|0, (y+((i*13)%Math.max(6,h-6)))|0, 2,2);
+    // bevel
+    ctx.fillStyle = "#3e5a8f";
+    ctx.fillRect(x|0, y|0, w|0, 2);
+    ctx.fillRect(x|0, (y+h-2)|0, w|0, 2);
+    ctx.fillRect(x|0, y|0, 2, h|0);
+    ctx.fillRect((x+w-2)|0, y|0, 2, h|0);
+    // rivets
+    ctx.fillStyle = "#6a86c9";
+    ctx.fillRect((x+4)|0, (y+4)|0, 2,2);
+    ctx.fillRect((x+w-6)|0, (y+4)|0, 2,2);
+    ctx.fillRect((x+4)|0, (y+h-6)|0, 2,2);
+    ctx.fillRect((x+w-6)|0, (y+h-6)|0, 2,2);
+  }
+
+  function drawPlayer(x,y) {
+    // body
+    ctx.fillStyle = "#9cd1ff";
+    ctx.fillRect((x-2)|0, (y-2)|0, (player.w+4)|0, (player.h+4)|0);
+    ctx.fillStyle = "#2f7bd6";
+    ctx.fillRect(x|0, y|0, player.w|0, player.h|0);
+    // visor
+    ctx.fillStyle = "#cfe7ff";
+    ctx.fillRect((x+6)|0, (y+6)|0, 12, 8);
+    // gun arm glow
+    ctx.fillStyle = "#55b7ff";
+    ctx.fillRect((x+player.w-6)|0, (y+14)|0, 8, 6);
+    // feet shadow
+    ctx.fillStyle = "#10233a"; ctx.fillRect((x+3)|0, (y+player.h-3)|0, 8, 3);
+    ctx.fillRect((x+player.w-12)|0, (y+player.h-3)|0, 8, 3);
+  }
+  function drawGoblin(x,y,fly) {
+    ctx.fillStyle = "#183b1f";
+    ctx.fillRect((x-2)|0, (y-2)|0, 26, 26);
+    ctx.fillStyle = "#2c8c3a";
+    ctx.fillRect((x)|0, y|0, 22, 24);
+    // eyes
+    ctx.fillStyle = "#ffd3d3"; ctx.fillRect((x+6)|0, (y+6)|0, 4,3); ctx.fillRect((x+12)|0, (y+6)|0, 4,3);
+    ctx.fillStyle = "#812"; ctx.fillRect((x+7)|0, (y+7)|0, 2,2); ctx.fillRect((x+13)|0, (y+7)|0, 2,2);
+    // wings for flyer
+    if (fly) {
+      ctx.fillStyle = "#2b5";
+      ctx.fillRect((x-8)|0, (y+4)|0, 8, 3);
+      ctx.fillRect((x+22)|0, (y+4)|0, 8, 3);
+    }
+  }
+  function drawBoss(x,y) {
+    // body
+    ctx.fillStyle = "#3a1f1f"; ctx.fillRect((x-4)|0, (y-4)|0, 48, 42);
+    ctx.fillStyle = "#7a2e2e"; ctx.fillRect(x|0, y|0, 40, 34);
+    // face
+    ctx.fillStyle = "#ffd0d0";
+    ctx.fillRect((x+10)|0, (y+10)|0, 6,5);
+    ctx.fillRect((x+24)|0, (y+10)|0, 6,5);
+    ctx.fillStyle = "#500"; ctx.fillRect((x+11)|0, (y+11)|0, 2,3); ctx.fillRect((x+25)|0, (y+11)|0, 2,3);
+    // crown
+    ctx.fillStyle = "#ffd65a"; ctx.fillRect((x+6)|0, (y-8)|0, 28, 8);
+    ctx.fillRect((x+8)|0, (y-12)|0, 4, 4); ctx.fillRect((x+18)|0, (y-12)|0, 4, 4); ctx.fillRect((x+28)|0, (y-12)|0, 4, 4);
+  }
+  function drawHeart(x,y) {
+    ctx.fillStyle="#f55"; ctx.fillRect((x-6)|0, (y-2)|0, 6,6); ctx.fillRect((x)|0, (y-2)|0, 6,6); ctx.fillRect((x-8)|0, y|0, 16,8); ctx.fillRect((x-4)|0, (y+6)|0, 8,6);
+  }
+  function drawShield(x,y) {
+    ctx.fillStyle="#9cf"; ctx.fillRect((x-6)|0,(y-10)|0,12,14);
+    ctx.fillStyle="#235"; ctx.fillRect((x-4)|0,(y-8)|0,8,10);
+  }
+  function drawCrown(x,y) {
+    ctx.fillStyle="#ffd65a"; ctx.fillRect((x-10)|0,(y-6)|0,20,6);
+    ctx.fillRect((x-8)|0,(y-10)|0,4,4); ctx.fillRect((x-2)|0,(y-12)|0,4,6); ctx.fillRect((x+4)|0,(y-10)|0,4,4);
+  }
+  function drawWeaponGem(x,y,idx) {
+    const col = ["#55b7ff","#7fe07f","#e0a87f","#d77fff","#ffef7f","#b7a7ff"][idx % 6];
+    ctx.fillStyle=col; ctx.fillRect((x-6)|0,(y-6)|0,12,12);
+    ctx.fillStyle="#fff"; ctx.fillRect((x-2)|0,(y-2)|0,4,4);
+  }
+
+  // ---------- Flow / UI ----------
+  function updateMenu() {
+    const save = loadState();
+    renderBoard(board);
+    $id("btnContinue").disabled = !save;
+    menu.hidden = false; levelOver.hidden = true; gameOver.hidden = true;
+  }
+  function startNew() {
+    level = 1; crowns = 0; score = 0; clearsThisRun = 0; startedAt = performance.now();
+    weaponIndex = 0; unlocks = new Set(["Gun"]);
+    player.hp = player.maxHp = 3; player.armor = 0;
+    seed = Math.floor(Math.random()*1e9);
+    generateLevel(level);
+    gamePaused = false; menu.hidden = true; levelOver.hidden = true; gameOver.hidden = true;
+    flashMsg("Good luck!");
+  }
+  function continueRun() {
+    const s = loadState();
+    if (!s) return startNew();
+    level = s.run.level; crowns = s.run.crowns; score = s.run.score; startedAt = performance.now(); clearsThisRun = 0;
+    seed = s.run.rngSeed || Math.floor(Math.random()*1e9);
+    unlocks = new Set(s.run.weaponsUnlocked || ["Gun"]);
+    weaponIndex = s.player.weaponIndex || 0;
+    player.hp = s.player.hp; player.maxHp = s.player.maxHp; player.armor = s.player.armor;
+    generateLevel(level);
+    gamePaused = false; menu.hidden = true; levelOver.hidden = true; gameOver.hidden = true;
+    flashMsg("Welcome back!");
+  }
+  function levelComplete({timeSec}) {
+    gamePaused = true;
+    saveState();
+    $id("levelTitle").textContent = `👑 Boss Down! Level ${level} Cleared`;
+    const acc = player.shotsFired ? Math.round(100*player.shotsHit/player.shotsFired) : 0;
+    const bonus = Math.max(0, 200 - Math.round(timeSec)) + 50*level + 100;
+    score += bonus;
+    $id("levelStats").innerHTML =
+      `Crowns: ${crowns} &nbsp;|&nbsp; Score: ${score} &nbsp;|&nbsp; Time: ${timeSec.toFixed(1)}s &nbsp;|&nbsp; Accuracy: ${acc}%<br>` +
+      `<span class="small">Bonus for speed+level: +${bonus}</span>`;
+    levelOver.hidden = false; menu.hidden = true; gameOver.hidden = true;
+  }
+  function nextLevel() {
+    level++;
+    generateLevel(level);
+    gamePaused = false; levelOver.hidden = true;
+  }
+  function onGameOver() {
+    gamePaused = true;
+    const t = (performance.now()-startedAt)/1000;
+    const name = "You";
+    submitScore(name, score, crowns, level, t);
+    renderBoard(board2);
+    $id("finalStats").innerHTML = `Score: <strong>${score}</strong> &nbsp;|&nbsp; Crowns: ${crowns} &nbsp;|&nbsp; Level: ${level} &nbsp;|&nbsp; Time: ${t.toFixed(1)}s`;
+    gameOver.hidden = false; menu.hidden = true; levelOver.hidden = true;
+    // wipe continue so a "game over" can't soft-cheese
+    wipeState();
+  }
+  function flashMsg(txt) {
+    msg.textContent = txt;
+    msg.style.opacity = "1";
+    msg.style.transition = "none";
+    requestAnimationFrame(()=> {
+      msg.style.transition = "opacity 1.2s ease";
+      msg.style.opacity = "0.0";
+    });
+  }
+
+  // Buttons
+  $id("btnStart").onclick = startNew;
+  $id("btnContinue").onclick = continueRun;
+  $id("btnWipe").onclick = () => { wipeState(); flashMsg("Save cleared"); };
+  $id("btnNext").onclick = nextLevel;
+  $id("btnQuit").onclick = () => { gamePaused = true; updateMenu(); };
+  $id("btnRestart").onclick = startNew;
+  $id("btnBack").onclick = () => { gamePaused = true; updateMenu(); };
+
+  // Show menu initially
+  updateMenu();
+
+  // ---------- Main Loop ----------
+  function frame() {
+    if (!gamePaused) {
+      update();
+      saveState();
+    }
+    draw();
+    requestAnimationFrame(frame);
+  }
+  frame();
+
+})();
+</script>
+</body>
+</html>
